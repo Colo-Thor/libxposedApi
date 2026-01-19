@@ -1,14 +1,12 @@
 package io.github.libxposed.api;
 
-import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
-import android.content.res.Resources;
+import android.os.ParcelFileDescriptor;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -47,7 +45,7 @@ public interface XposedInterface {
     int FRAMEWORK_PRIVILEGE_APP = 2;
     /**
      * Indicates that the framework is embedded in the hooked app,
-     * which means {@link #getSharedPreferences} will be null and remote file is unsupported.
+     * which means {@link #getRemotePreferences} will be null and remote file is unsupported.
      */
     int FRAMEWORK_PRIVILEGE_EMBEDDED = 3;
 
@@ -65,9 +63,107 @@ public interface XposedInterface {
     int PRIORITY_HIGHEST = 10000;
 
     /**
+     * Contextual interface for before invocation callbacks.
+     */
+    interface BeforeHookCallback {
+        /**
+         * Gets the method / constructor to be hooked.
+         */
+        @NonNull
+        Member getMember();
+
+        /**
+         * Gets the {@code this} object, or {@code null} if the method is static.
+         */
+        @Nullable
+        Object getThisObject();
+
+        /**
+         * Gets the arguments passed to the method / constructor. You can modify the arguments.
+         */
+        @NonNull
+        Object[] getArgs();
+
+        /**
+         * Sets the return value of the method and skip the invocation. If the procedure is a constructor,
+         * the {@code result} param will be ignored.
+         * Note that the after invocation callback will still be called.
+         *
+         * @param result The return value
+         */
+        void returnAndSkip(@Nullable Object result);
+
+        /**
+         * Throw an exception from the method / constructor and skip the invocation.
+         * Note that the after invocation callback will still be called.
+         *
+         * @param throwable The exception to be thrown
+         */
+        void throwAndSkip(@Nullable Throwable throwable);
+    }
+
+    /**
+     * Contextual interface for after invocation callbacks.
+     */
+    interface AfterHookCallback {
+        /**
+         * Gets the method / constructor to be hooked.
+         */
+        @NonNull
+        Member getMember();
+
+        /**
+         * Gets the {@code this} object, or {@code null} if the method is static.
+         */
+        @Nullable
+        Object getThisObject();
+
+        /**
+         * Gets all arguments passed to the method / constructor.
+         */
+        @NonNull
+        Object[] getArgs();
+
+        /**
+         * Gets the return value of the method or the before invocation callback. If the procedure is a
+         * constructor, a void method or an exception was thrown, the return value will be {@code null}.
+         */
+        @Nullable
+        Object getResult();
+
+        /**
+         * Gets the exception thrown by the method / constructor or the before invocation callback. If the
+         * procedure call was successful, the return value will be {@code null}.
+         */
+        @Nullable
+        Throwable getThrowable();
+
+        /**
+         * Gets whether the invocation was skipped by the before invocation callback.
+         */
+        boolean isSkipped();
+
+        /**
+         * Sets the return value of the method and skip the invocation. If the procedure is a constructor,
+         * the {@code result} param will be ignored.
+         *
+         * @param result The return value
+         */
+        void setResult(@Nullable Object result);
+
+        /**
+         * Sets the exception thrown by the method / constructor.
+         *
+         * @param throwable The exception to be thrown.
+         */
+        void setThrowable(@Nullable Throwable throwable);
+    }
+
+    /**
      * Interface for method / constructor hooking. Xposed modules should define their own hooker class
-     * and implement this interface. Normally, there could be one global hooker class for all method
-     * hooking.
+     * and implement this interface. Normally, a hooker class corresponds to a method / constructor, but
+     * there could also be a single hooker class for all of them. By this way you can implement an interface
+     * like the old API.
      *
      * <p>
      * Classes implementing this interface should be annotated with {@link XposedHooker} and should provide
@@ -77,36 +173,45 @@ public interface XposedInterface {
      *
      * <p>
      * The before invocation method should have the following signature:<br/>
-     * params: {@code member} - The {@link Member} object representing the method or constructor being hooked<br/>
-     * &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-     * {@code thisObject} - The {@code this} pointer, or null if the method is static<br/>
-     * &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-     * {@code args} - The arguments used for the method call<br/>
-     * returns: An {@link Hooker} object, used to save contextual information for current invocation routine
+     * Param {@code callback}: The {@link BeforeHookCallback} of the procedure call.<br/>
+     * Return value: If you want to save contextual information of one procedure call between the before
+     * and after callback, it could be a self-defined class, otherwise it should be {@code void}.
      * </p>
      *
      * <p>
      * The after invocation method should have the following signature:<br/>
-     * params: {@code extras} - The {@link Hooker} object returned by the before invocation method<br/>
-     * &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-     * {@code result} - The result of the invocation
+     * Param {@code callback}: The {@link AfterHookCallback} of the procedure call.<br/>
+     * Param {@code context} (optional): The contextual object returned by the before invocation.
      * </p>
      *
      * <p>Example usage:</p>
      *
      * <pre>{@code
      *   @XposedHooker
-     *   public class ExampleHooker implements XposedInterface.Hooker {
+     *   public class ExampleHooker implements Hooker {
      *
      *       @BeforeInvocation
-     *       public static @Nullable XposedInterface.Hooker
-     *       before(@NonNull Member member, @Nullable Object thisObject, @NonNull Object[] args) {
+     *       public static void before(@NonNull BeforeHookCallback callback) {
      *           // Pre-hooking logic goes here
      *       }
      *
      *       @AfterInvocation
-     *       public static void
-     *       after(@Nullable XposedInterface.Hooker extras, @Nullable Object result) {
+     *       public static void after(@NonNull AfterHookCallback callback) {
+     *           // Post-hooking logic goes here
+     *       }
+     *   }
+     *
+     *   @XposedHooker
+     *   public class ExampleHookerWithContext implements Hooker {
+     *
+     *       @BeforeInvocation
+     *       public static MyContext before(@NonNull BeforeHookCallback callback) {
+     *           // Pre-hooking logic goes here
+     *           return new MyContext();
+     *       }
+     *
+     *       @AfterInvocation
+     *       public static void after(@NonNull AfterHookCallback callback, MyContext context) {
      *           // Post-hooking logic goes here
      *       }
      *   }
@@ -334,42 +439,39 @@ public interface XposedInterface {
     @Nullable
     DexParser parseDex(@NonNull ByteBuffer dexData, boolean includeAnnotations) throws IOException;
 
-
-    // Methods the same with Context
+    /**
+     * Gets the application info of the module.
+     */
+    @NonNull
+    ApplicationInfo getApplicationInfo();
 
     /**
      * Gets remote preferences stored in Xposed framework. Note that those are read-only in hooked apps.
      *
-     * @see Context#getSharedPreferences(String, int)
+     * @param group Group name
+     * @return The preferences
+     * @throws UnsupportedOperationException If the framework is embedded
      */
-    SharedPreferences getSharedPreferences(String name, int mode);
+    @NonNull
+    SharedPreferences getRemotePreferences(@NonNull String group);
 
     /**
-     * Open a remote file stored in Xposed framework.
+     * List all files in the module's shared data directory.
      *
-     * @see Context#openFileInput(String)
+     * @return The file list
+     * @throws UnsupportedOperationException If the framework is embedded
      */
-    FileInputStream openFileInput(String name) throws FileNotFoundException;
+    @NonNull
+    String[] listRemoteFiles();
 
     /**
-     * List all remote files stored in Xposed framework. Note that you can only access files created by
-     * your own module app with XposedService.
+     * Open a file in the module's shared data directory. The file is opened in read-only mode.
      *
-     * @see Context#fileList()
+     * @param name File name, must not contain path separators and . or ..
+     * @return The file descriptor
+     * @throws FileNotFoundException         If the file does not exist or the path is forbidden
+     * @throws UnsupportedOperationException If the framework is embedded
      */
-    String[] fileList();
-
-    /**
-     * Gets resources of the module.
-     *
-     * @see Context#getResources()
-     */
-    Resources getResources();
-
-    /**
-     * Gets the application info of the module.
-     *
-     * @see Context#getApplicationInfo()
-     */
-    ApplicationInfo getApplicationInfo();
+    @NonNull
+    ParcelFileDescriptor openRemoteFile(@NonNull String name) throws FileNotFoundException;
 }
